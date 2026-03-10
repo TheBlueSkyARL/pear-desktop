@@ -9,7 +9,7 @@ import {
   Utils,
   YTNodes,
   Platform,
-} from '\u0079\u006f\u0075\u0074\u0075\u0062\u0065i.js';
+} from 'youtubei.js';
 import is from 'electron-is';
 import filenamify from 'filenamify';
 import { Mutex } from 'async-mutex';
@@ -39,15 +39,20 @@ import { DefaultPresetList, type Preset, VideoFormatList } from '../types';
 import type { DownloaderPluginConfig } from '../index';
 import type { BackendContext } from '@/types/contexts';
 import type { GetPlayerResponse } from '@/types/get-player-response';
-import type { FormatOptions } from 'node_modules/\u0079\u006f\u0075\u0074\u0075\u0062\u0065i.js/dist/src/types';
-import type { VideoInfo } from 'node_modules/\u0079\u006f\u0075\u0074\u0075\u0062\u0065i.js/dist/src/parser/\u0079\u006f\u0075\u0074\u0075\u0062\u0065';
-import type { PlayerErrorMessage } from 'node_modules/\u0079\u006f\u0075\u0074\u0075\u0062\u0065i.js/dist/src/parser/nodes';
+import type { FormatOptions } from 'node_modules/youtubei.js/dist/src/types';
+import type { VideoInfo } from 'node_modules/youtubei.js/dist/src/parser/youtube';
+import type { PlayerErrorMessage } from 'node_modules/youtubei.js/dist/src/parser/nodes';
 import type {
   TrackInfo,
   Playlist,
-} from 'node_modules/\u0079\u006f\u0075\u0074\u0075\u0062\u0065i.js/dist/src/parser/ytmusic';
+} from 'node_modules/youtubei.js/dist/src/parser/ytmusic';
 
 type CustomSongInfo = SongInfo & { trackId?: string };
+
+type VMPrimative = string | number | boolean | null | undefined;
+type BuildScriptResult = {
+  output: string;
+};
 
 const ffmpeg = lazy(async () =>
   (await import('@ffmpeg.wasm/main')).createFFmpeg({
@@ -58,25 +63,33 @@ const ffmpeg = lazy(async () =>
 );
 const ffmpegMutex = new Mutex();
 
-Platform.shim.eval = async (data: Types.BuildScriptResult, env: Record<string, Types.VMPrimative>) => {
-  const properties = [];
+Platform.shim.eval = async (
+  data: BuildScriptResult,
+  env: Record<string, VMPrimative>,
+) => {
+  const code = `${data.output}\n\nreturn (function (env) {\n  const nFn = exportedVars?.nFunction;\n  const sigFn = exportedVars?.sigFunction;\n\n  return {\n    n: typeof env?.n === 'string' && typeof nFn === 'function' ? nFn(env.n) : undefined,\n    sig: typeof env?.sig === 'string' && typeof sigFn === 'function' ? sigFn(env.sig) : undefined,\n  };\n})(arguments[0]);`;
 
-  if(env.n) {
-    properties.push(`n: exportedVars.nFunction("${env.n}")`)
-  }
-
-  if (env.sig) {
-    properties.push(`sig: exportedVars.sigFunction("${env.sig}")`)
-  }
-
-  const code = `${data.output}\nreturn { ${properties.join(', ')} }`;
-
-  return new Function(code)();
-}
+  // Pass env as an argument to avoid string interpolation of potentially unsafe values.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  return new Function(code)(env);
+};
 
 let yt: Innertube;
 let win: BrowserWindow;
 let playingUrl: string;
+
+const fallbackPlayerIds = [
+  '140dafda',
+  '4eecba16',
+  '00c52fa0',
+  '251ca12e',
+  '267b6435',
+  '32a343c8',
+  '48995d17',
+  '4c5cf06a',
+  '9f4cc5e4',
+  'a944b11f',
+];
 
 const isPremium = async () => {
   // If signed out, it is understood as non-premium
@@ -151,6 +164,7 @@ export const onMainLoad = async ({
     cookie: await getCookieFromWindow(win),
     generate_session_locally: true,
     fetch: getNetFetchAsFetch(),
+    player_id: fallbackPlayerIds[0],
   });
 
   const requestKey = 'O43z0dpjhgX20SCx4KAo';
@@ -421,8 +435,7 @@ async function downloadSongUnsafe(
   let targetFileExtension: string;
   if (!presetSetting?.extension) {
     targetFileExtension =
-      VideoFormatList.find((it) => it.itag === format.itag)?.container ??
-      'mp3';
+      VideoFormatList.find((it) => it.itag === format.itag)?.container ?? 'mp3';
   } else {
     targetFileExtension = presetSetting?.extension ?? 'mp3';
   }
